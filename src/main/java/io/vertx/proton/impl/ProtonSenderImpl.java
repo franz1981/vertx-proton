@@ -15,6 +15,8 @@
 */
 package io.vertx.proton.impl;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.vertx.core.Handler;
 import io.vertx.proton.ProtonDelivery;
 import io.vertx.proton.ProtonSender;
@@ -68,6 +70,8 @@ public class ProtonSenderImpl extends ProtonLinkImpl<ProtonSender> implements Pr
     binary[3] = (byte) (value >>> 24);
   }
 
+  private final byte[] tempBuffer = new byte[1024];
+
   @Override
   public ProtonDelivery send(byte[] tag, Message message) {
     return send(tag, message, null);
@@ -81,21 +85,26 @@ public class ProtonSenderImpl extends ProtonLinkImpl<ProtonSender> implements Pr
     // TODO: prevent odd combination of onRecieved callback + SenderSettleMode.SETTLED, or just allow it?
 
     Delivery delivery = sender().delivery(tag); // start a new delivery..
-    int BUFFER_SIZE = 1024;
-    byte[] encodedMessage = new byte[BUFFER_SIZE];
+    byte[] encodedMessage = tempBuffer;
 
     // protonj has a nice encode2 method which tells us what
     // encoded message length would be even if our buffer is too small.
 
     MessageImpl msg = (MessageImpl) message;
-    int len = msg.encode2(encodedMessage, 0, BUFFER_SIZE);
+    int len = msg.encode2(encodedMessage, 0, tempBuffer.length);
 
     // looks like the message is bigger than our initial buffer, lets resize and try again.
     if (len > encodedMessage.length) {
-      encodedMessage = new byte[len];
-      msg.encode(encodedMessage, 0, len);
+      final ByteBuf encodedMessageBuffer = PooledByteBufAllocator.DEFAULT.buffer(len, len);
+      try {
+        msg.encode(encodedMessageBuffer.array(), encodedMessageBuffer.arrayOffset(), len);
+        sender().send(encodedMessageBuffer.array(), encodedMessageBuffer.arrayOffset(), len);
+      } finally {
+        encodedMessageBuffer.release();
+      }
+    } else {
+      sender().send(encodedMessage, 0, len);
     }
-    sender().send(encodedMessage, 0, len);
 
     if (link.getSenderSettleMode() == SenderSettleMode.SETTLED) {
       delivery.settle();
